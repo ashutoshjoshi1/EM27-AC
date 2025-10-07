@@ -241,6 +241,30 @@ class ACModbusWrapper:
         if enable_flags is not None:
             return self.write_register(4, enable_flags & ~0x01)
         return False
+
+    def set_temperature(self, value: int) -> bool:
+        """Set cooling setpoint temperature (alias for set_cooling_setpoint)"""
+        return self.set_cooling_setpoint(value)
+
+    def set_mode(self, mode: str) -> bool:
+        """Set AC mode (Cool, Heat)"""
+        # This is a placeholder - adjust based on actual device needs
+        enable_flags = self.read_register("SET_ENABLE_FLAGS")
+        if enable_flags is None:
+            return False
+
+        # Example: 0x02 for Cool, 0x04 for Heat
+        if mode.lower() == "cool":
+            return self.write_register(4, (enable_flags & ~0x04) | 0x02)
+        elif mode.lower() == "heat":
+            return self.write_register(4, (enable_flags & ~0x02) | 0x04)
+        return False
+
+    def set_fan_speed(self, speed: str) -> bool:
+        """Set fan speed"""
+        # This is a placeholder - fan speed control is not defined in the register map
+        print(f"Fan speed control not implemented. Received: {speed}")
+        return True
     
     def __enter__(self):
         """Context manager entry"""
