@@ -40,17 +40,22 @@ class MainWindow(QMainWindow):
         self.startup_check()
 
         self.ac_tab = ACControlWidget(self)
-        try:
-            self.tabs.addTab(self.ac_tab, "AC Control")
-        except AttributeError:
-            self.setCentralWidget(self.ac_tab)
+        self.tabs.addTab(self.ac_tab, "AC Control")
 
     def setup_ui(self):
         """Main UI setup method."""
-        central = QWidget()
-        central.setStyleSheet(config.STYLES["main_window"])
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # Create Tab Widget
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+
+        # Create the main tab
+        main_tab = QWidget()
+        self.tabs.addTab(main_tab, "Monitoring & Control")
+        main_tab_layout = QVBoxLayout(main_tab)
 
         # Status Bar
         self.status = QStatusBar()
@@ -61,11 +66,11 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self._create_camera_group())
         top_layout.addWidget(self._create_sensor_cards_group())
         top_layout.addLayout(self._create_controllers_group())
-        main_layout.addLayout(top_layout)
+        main_tab_layout.addLayout(top_layout)
 
         # --- Bottom Layout ---
-        main_layout.addWidget(self._create_motor_control_group())
-        main_layout.addWidget(self._create_plots_group())
+        main_tab_layout.addWidget(self._create_motor_control_group())
+        main_tab_layout.addWidget(self._create_plots_group())
 
     def _create_camera_group(self):
         """Creates the camera feed UI group."""
