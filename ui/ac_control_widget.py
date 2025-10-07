@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel,
     QPushButton, QComboBox, QCheckBox, QSlider, QDoubleSpinBox, QLineEdit
@@ -16,8 +16,13 @@ class ACControlWidget(QWidget):
         super().__init__(parent)
 
         # ---- Service ----
-        self.svc = ACService(poll_ms=1000)
+        self.svc = ACService()
         self.svc.start()
+
+        # ---- Polling Timer ----
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(1000)  # Poll every 1 second
+        self.poll_timer.timeout.connect(self.svc.poll_now)
 
         # ---- UI ----
         root = QVBoxLayout(self)
@@ -45,13 +50,12 @@ class ACControlWidget(QWidget):
 
         self.chk_power = QCheckBox("Power ON")
         self.cmb_mode = QComboBox()
-        self.cmb_mode.addItems(["Auto", "Cool", "Heat", "Dry", "Fan"])  # adjust to device
-
+        self.cmb_mode.addItems(["Auto", "Cool", "Heat", "Dry", "Fan"])
         self.cmb_fan = QComboBox()
-        self.cmb_fan.addItems(["Auto", "Low", "Medium", "High"])       # adjust to device
+        self.cmb_fan.addItems(["Auto", "Low", "Medium", "High"])
 
         self.temp_slider = QSlider(Qt.Horizontal)
-        self.temp_slider.setRange(16, 30)  # °C typical range; adjust as needed
+        self.temp_slider.setRange(16, 30)
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setDecimals(1)
         self.temp_spin.setRange(16.0, 30.0)
@@ -90,27 +94,20 @@ class ACControlWidget(QWidget):
         # ---- Wire up signals ----
         self.btn_connect.clicked.connect(self._on_connect)
         self.btn_disconnect.clicked.connect(self._on_disconnect)
-
         self.chk_power.toggled.connect(self.svc.set_power)
         self.cmb_mode.currentTextChanged.connect(self.svc.set_mode)
         self.cmb_fan.currentTextChanged.connect(self.svc.set_fan)
-
         self.temp_slider.valueChanged.connect(lambda v: self.temp_spin.setValue(float(v)))
         self.temp_spin.valueChanged.connect(self._on_temp_changed)
-
         self.svc.status.connect(self._on_status)
         self.svc.error.connect(self._on_error)
         self.svc.connected.connect(self._on_connected)
 
-        # Start disabled until connected
         self._set_controls_enabled(False)
 
-    # ---------- UI handlers ----------
     def _on_connect(self) -> None:
         port = self.port_edit.text().strip()
-        if port:
-            self.svc._port = port  # update desired port
-        self.svc.connect_device()
+        self.svc.connect_device(port)
 
     def _on_disconnect(self) -> None:
         self.svc.disconnect_device()
@@ -119,23 +116,19 @@ class ACControlWidget(QWidget):
         self.svc.set_temperature(float(value))
 
     def _on_status(self, s: dict) -> None:
-        # Update labels; keep text friendly
         if "power" in s:
             self.lbl_power.setText(f"Power: {'ON' if s['power'] else 'OFF'}")
             self.chk_power.blockSignals(True)
             self.chk_power.setChecked(bool(s["power"]))
             self.chk_power.blockSignals(False)
-
         if "mode" in s and s["mode"]:
             self.lbl_mode.setText(f"Mode: {s['mode']}")
-            # sync combo silently if differs
             if self.cmb_mode.currentText() != str(s["mode"]):
                 self.cmb_mode.blockSignals(True)
                 idx = self.cmb_mode.findText(str(s["mode"]))
                 if idx >= 0:
                     self.cmb_mode.setCurrentIndex(idx)
                 self.cmb_mode.blockSignals(False)
-
         if "fan" in s and s["fan"]:
             self.lbl_fan.setText(f"Fan: {s['fan']}")
             if self.cmb_fan.currentText() != str(s["fan"]):
@@ -144,10 +137,8 @@ class ACControlWidget(QWidget):
                 if idx >= 0:
                     self.cmb_fan.setCurrentIndex(idx)
                 self.cmb_fan.blockSignals(False)
-
         if "target" in s and s["target"] is not None:
             self.lbl_target.setText(f"Target: {s['target']} °C")
-            # keep slider/spin synced
             try:
                 target = float(s["target"])
                 self.temp_slider.blockSignals(True)
@@ -159,18 +150,20 @@ class ACControlWidget(QWidget):
             finally:
                 self.temp_slider.blockSignals(False)
                 self.temp_spin.blockSignals(False)
-
         if "temperature" in s and s["temperature"] is not None:
             self.lbl_temp.setText(f"Ambient: {s['temperature']} °C")
 
     def _on_error(self, msg: str) -> None:
-        # Lightweight error display without modal blocking
         self.lbl_temp.setText(f"Error: {msg}")
 
     def _on_connected(self, ok: bool) -> None:
         self.btn_connect.setEnabled(not ok)
         self.btn_disconnect.setEnabled(ok)
         self._set_controls_enabled(ok)
+        if ok:
+            self.poll_timer.start()
+        else:
+            self.poll_timer.stop()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.chk_power.setEnabled(enabled)
@@ -179,9 +172,7 @@ class ACControlWidget(QWidget):
         self.temp_slider.setEnabled(enabled)
         self.temp_spin.setEnabled(enabled)
 
-    # Cleanup when widget is closed
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        try:
-            self.svc.stop()
-        finally:
-            super().closeEvent(event)
+    def closeEvent(self, event) -> None:
+        self.poll_timer.stop()
+        self.svc.stop()
+        super().closeEvent(event)
