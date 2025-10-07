@@ -5,6 +5,7 @@ import threading
 from typing import Optional, Any
 
 from pymodbus.client import AsyncModbusSerialClient
+from pymodbus.exceptions import ModbusIOException
 from pymodbus.framer import FramerType
 
 
@@ -37,16 +38,42 @@ class ACModbusWrapper:
         "READ_CONTACT_STATUS": {"address": 16, "signed": False},
     }
 
-    def __init__(self, port: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        port: Optional[str] = None,
+        *,
+        slave_id: int = 1,
+        baudrate: int = 19200,
+        bytesize: int = 8,
+        parity: str = "E",
+        stopbits: int = 1,
+        timeout: float = 2.0,
+        retries: int = 3,
+    ) -> None:
         """
         Initialise the wrapper.
 
         Args:
             port: Serial port name (e.g. ``"COM5"`` or ``"/dev/ttyUSB0"``).
                 If omitted, ``"COM5"`` is used by default.
+            slave_id: Modbus device ID. Defaults to 1.
+            baudrate: Serial baud rate. Defaults to 19200.
+            bytesize: Number of bits per byte (7 or 8). Defaults to 8.
+            parity: Parity bit to use ('N', 'E', 'O'). Defaults to 'E'.
+            stopbits: Number of stop bits (1, 1.5 or 2). Defaults to 1.
+            timeout: Timeout for connecting and receiving data in seconds. Defaults to 2.0.
+            retries: Maximum number of retries per request before an exception is raised.
+                Defaults to 3.  Increasing this may help with flaky connections, whereas
+                lowering it will return errors more quickly.
         """
         self.port: str = port or "COM5"
-        self.slave_id: int = 1
+        self.slave_id: int = slave_id
+        self.baudrate: int = baudrate
+        self.bytesize: int = bytesize
+        self.parity: str = parity
+        self.stopbits: int = stopbits
+        self.timeout: float = timeout
+        self.retries: int = retries
         self.client: Optional[AsyncModbusSerialClient] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -98,15 +125,25 @@ class ACModbusWrapper:
         # Ensure the event loop is running
         self._ensure_loop()
         async def _do_connect() -> bool:
-            # Instantiate the client within the running event loop
+            """
+            Coroutine to instantiate and connect the asynchronous Modbus client.
+
+            Uses the configuration provided at construction time, including
+            ``baudrate``, ``bytesize``, ``parity``, ``stopbits``, ``timeout``
+            and ``retries``.  Adjusting these values may help with devices that
+            respond slowly or require different serial settings.
+            """
+            # Instantiate the client within the running event loop.  All
+            # parameters are explicitly passed from the wrapper's state
             self.client = AsyncModbusSerialClient(
                 framer=FramerType.RTU,
                 port=self.port,
-                baudrate=19200,
-                stopbits=1,
-                bytesize=8,
-                parity="E",
-                timeout=2,
+                baudrate=self.baudrate,
+                stopbits=self.stopbits,
+                bytesize=self.bytesize,
+                parity=self.parity,
+                timeout=self.timeout,
+                retries=self.retries,
             )
             await self.client.connect()
             return bool(self.client.connected)
@@ -208,7 +245,25 @@ class ACModbusWrapper:
         try:
             future = asyncio.run_coroutine_threadsafe(_read(), self._loop)
             return future.result()
+        except ModbusIOException as exc:
+            # A Modbus I/O error indicates no response was received from the
+            # device after the configured number of retries.  Log the error,
+            # attempt a reconnect once, and return None so the caller can decide
+            # how to proceed.
+            print(
+                f"Modbus I/O error while reading register {reg_name}: {exc}. "
+                "Attempting to reconnect..."
+            )
+            try:
+                # Reset the connection in case the client got stuck
+                self.disconnect()
+                self.connect(self.port)
+            except Exception:
+                # Ignore errors during reconnect
+                pass
+            return None
         except Exception as exc:
+            # Other exceptions are unexpected; log and return None
             print(f"Error reading register {reg_name}: {exc}")
             return None
 
@@ -241,6 +296,17 @@ class ACModbusWrapper:
         try:
             future = asyncio.run_coroutine_threadsafe(_write(), self._loop)
             return future.result()
+        except ModbusIOException as exc:
+            print(
+                f"Modbus I/O error while writing register {address}: {exc}. "
+                "Attempting to reconnect..."
+            )
+            try:
+                self.disconnect()
+                self.connect(self.port)
+            except Exception:
+                pass
+            return False
         except Exception as exc:
             print(f"Error writing register {address}: {exc}")
             return False
