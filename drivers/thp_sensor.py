@@ -33,24 +33,7 @@ def read_thp_sensor_data(port_name, baud_rate=9600, timeout=1):
         
         # If we get here, we timed out without valid JSON
         ser.close()
-        
-        # Try to create mock data for testing if no real data is available
-        if not response or "Sensors" not in response:
-            print(f"No valid response from THP sensor, using mock data. Raw response: {response}")
-            return {
-                'sensor_id': 'MOCK',
-                'temperature': 25.0,
-                'humidity': 50.0,
-                'pressure': 1013.25
-            }
-        
         return None
     except Exception as e:
         print(f"THP sensor error: {e}")
-        # Return mock data for testing
-        return {
-            'sensor_id': 'MOCK',
-            'temperature': 25.0,
-            'humidity': 50.0,
-            'pressure': 1013.25
-        }
+        return None
