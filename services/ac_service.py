@@ -4,6 +4,7 @@ from typing import Optional
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer
 
 from controllers.ac_adapter import ACAdapter
+import config
 
 
 class ACService(QObject):
@@ -11,11 +12,11 @@ class ACService(QObject):
     error = pyqtSignal(str)
     connected = pyqtSignal(bool)
 
-    def __init__(self, port: Optional[AC] = None, poll_ms: int = 1000, parent: Optional[QObject] = None) -> None:
+    def __init__(self, port: Optional[str] = None, poll_ms: int = 1000, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._thread = QThread(self)
         self._thread.setObjectName("ACServiceThread")
-        self._port = port
+        self._port = port if port is not None else config.AC_CONTROLLER_PORT
         self._poll_ms = poll_ms
         self._poll_timer: Optional[QTimer] = None
         self._adapter: Optional[ACAdapter] = None

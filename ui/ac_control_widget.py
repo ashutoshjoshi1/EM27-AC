@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
 )
 
 from services.ac_service import ACService
+import config
 
 
 class ACControlWidget(QWidget):
@@ -27,7 +28,8 @@ class ACControlWidget(QWidget):
         conn_box = QGroupBox("Connection")
         conn_layout = QGridLayout(conn_box)
         self.port_edit = QLineEdit()
-        self.port_edit.setPlaceholderText("Optional: COM3 or /dev/ttyUSB0")
+        self.port_edit.setText(config.AC_CONTROLLER_PORT)
+        self.port_edit.setPlaceholderText("e.g., COM5")
         self.btn_connect = QPushButton("Connect")
         self.btn_disconnect = QPushButton("Disconnect")
         self.btn_disconnect.setEnabled(False)

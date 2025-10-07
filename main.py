@@ -39,9 +39,6 @@ class MainWindow(QMainWindow):
         self.initialize_timers()
         self.startup_check()
 
-        self.ac_tab = ACControlWidget(self)
-        self.tabs.addTab(self.ac_tab, "AC Control")
-
     def setup_ui(self):
         """Main UI setup method."""
         central_widget = QWidget()
@@ -71,6 +68,10 @@ class MainWindow(QMainWindow):
         # --- Bottom Layout ---
         main_tab_layout.addWidget(self._create_motor_control_group())
         main_tab_layout.addWidget(self._create_plots_group())
+
+        # Add AC Control Tab
+        self.ac_tab = ACControlWidget(self)
+        self.tabs.addTab(self.ac_tab, "AC Control")
 
     def _create_camera_group(self):
         """Creates the camera feed UI group."""
