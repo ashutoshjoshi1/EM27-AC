@@ -1,17 +1,31 @@
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SETPOINT: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error reading register READ_CONTROL_SENSOR: ModbusClientMixin.read_holding_registers() got an unexpected keyword argument 'unit'
-Error disconnecting: object NoneType can't be used in 'await' expression
+No response received after 3 retries, continue with next request
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> Repeating....
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+Error reading register READ_CONTROL_SETPOINT: Modbus Error: [Input/Output] No response received after 3 retries, continue with next request
+No response received after 3 retries, continue with next request
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+>>>>> Repeating....
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+Error reading register READ_CONTROL_SENSOR: Modbus Error: [Input/Output] No response received after 3 retries, continue with next request
+No response received after 3 retries, continue with next request
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> Repeating....
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+Error reading register READ_CONTROL_SETPOINT: Modbus Error: [Input/Output] No response received after 3 retries, continue with next request
+No response received after 3 retries, continue with next request
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+>>>>> Repeating....
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+>>>>> send: 0x1 0x3 0x0 0xc 0x0 0x1 0x44 0x9
+Error reading register READ_CONTROL_SENSOR: Modbus Error: [Input/Output] No response received after 3 retries, continue with next request
+No response received after 3 retries, continue with next request
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> Repeating....
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+>>>>> send: 0x1 0x3 0x0 0x5 0x0 0x1 0x94 0xb
+Error reading register READ_CONTROL_SETPOINT: Modbus Error: [Input/Output] No response received after 3 retries, continue with next request
+QThread: Destroyed while thread is still running
