@@ -1,16 +1,25 @@
-"""
-AC Modbus Wrapper - Provides synchronous interface to AC.py async Modbus operations
-"""
+from __future__ import annotations
+
 import asyncio
+import threading
 from typing import Optional, Any
+
 from pymodbus.client import AsyncModbusSerialClient
 from pymodbus.framer import FramerType
-from pymodbus.exceptions import ModbusException
 
 
 class ACModbusWrapper:
-    """Wrapper class to provide synchronous interface to async Modbus AC operations"""
-    
+    """
+    Wrapper class providing a synchronous interface to the asynchronous
+    Modbus operations used by the AC controller.
+
+    The class maintains its own asyncio event loop running in a
+    background thread. All asynchronous client operations are scheduled
+    onto that loop using ``run_coroutine_threadsafe``. This design
+    eliminates the ``RuntimeError: no running event loop`` that occurs
+    when ``AsyncModbusSerialClient`` is used without a running loop.
+    """
+
     # Register map (all holding registers)
     REGISTERS = {
         "SET_NETWORK_COOLING_SETPOINT": {"address": 0, "signed": True},
@@ -27,37 +36,69 @@ class ACModbusWrapper:
         "READ_OUTPUT_STATUS": {"address": 15, "signed": False},
         "READ_CONTACT_STATUS": {"address": 16, "signed": False},
     }
-    
-    def __init__(self, port: Optional[str] = None):
-        """Initialize AC Modbus wrapper
-        
-        Args:
-            port: Serial port name (e.g., 'COM5', '/dev/ttyUSB0'). Defaults to 'COM5'
+
+    def __init__(self, port: Optional[str] = None) -> None:
         """
-        self.port = port or "COM5"
-        self.slave_id = 1
+        Initialise the wrapper.
+
+        Args:
+            port: Serial port name (e.g. ``"COM5"`` or ``"/dev/ttyUSB0"``).
+                If omitted, ``"COM5"`` is used by default.
+        """
+        self.port: str = port or "COM5"
+        self.slave_id: int = 1
         self.client: Optional[AsyncModbusSerialClient] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._connected = False
-        
+        self._thread: Optional[threading.Thread] = None
+        self._connected: bool = False
+
+    # ---------------------------------------------------------------------
+    # Internal helpers
+    # ---------------------------------------------------------------------
+    def _ensure_loop(self) -> None:
+        """Ensure that a dedicated event loop and worker thread are running."""
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            return
+        # Create a new event loop
+        self._loop = asyncio.new_event_loop()
+        # Define a runner to start the loop in a thread
+        def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+        # Start the loop in a daemon thread
+        self._thread = threading.Thread(
+            target=_run_loop,
+            args=(self._loop,),
+            name="ACModbusWrapperLoop",
+            daemon=True,
+        )
+        self._thread.start()
+
+    # ---------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------
     def connect(self, port: Optional[str] = None) -> bool:
-        """Connect to AC device via Modbus serial
-        
+        """
+        Connect to the AC device using the configured serial port.
+
+        This method blocks until the asynchronous connection is complete. If
+        successful, ``is_connected()`` will return ``True`` afterwards.
+
         Args:
-            port: Optional override for serial port
-            
+            port: Optional new serial port to override the existing ``port``.
+
         Returns:
-            True if connected successfully
+            True if the connection succeeded, False otherwise.
         """
         if port:
             self.port = port
-            
-        try:
-            # Create new event loop for async operations
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            
-            # Create and connect client
+        # Avoid reconnecting if already connected
+        if self._connected:
+            return True
+        # Ensure the event loop is running
+        self._ensure_loop()
+        async def _do_connect() -> bool:
+            # Instantiate the client within the running event loop
             self.client = AsyncModbusSerialClient(
                 framer=FramerType.RTU,
                 port=self.port,
@@ -67,193 +108,185 @@ class ACModbusWrapper:
                 parity="E",
                 timeout=2,
             )
-            
-            # Run connection in event loop
-            self._loop.run_until_complete(self.client.connect())
-            self._connected = self.client.connected
-            
-            return self._connected
-        except Exception as e:
-            print(f"Error connecting to AC: {e}")
+            await self.client.connect()
+            return bool(self.client.connected)
+        try:
+            future = asyncio.run_coroutine_threadsafe(_do_connect(), self._loop)
+            self._connected = future.result()
+        except Exception as exc:
+            print(f"Error connecting to AC: {exc}")
             self._connected = False
-            return False
-    
+        return self._connected
+
     def disconnect(self) -> None:
-        """Disconnect from AC device"""
-        if self.client and self._connected:
-            try:
-                if self._loop and self._loop.is_running():
-                    self._loop.run_until_complete(self.client.close())
-                self._connected = False
-            except Exception as e:
-                print(f"Error disconnecting: {e}")
-        
-        # Clean up event loop
-        if self._loop:
-            try:
-                self._loop.close()
-            except Exception:
-                pass
+        """
+        Disconnect from the AC device and stop the background event loop.
+
+        This call blocks until the client has been closed and the loop
+        stopped. After calling ``disconnect()``, the wrapper may be reused
+        by calling ``connect()`` again.
+        """
+        if not self._connected:
+            return
+        async def _do_disconnect() -> None:
+            if self.client:
+                await self.client.close()
+        try:
+            if self._loop and self._thread and self._thread.is_alive():
+                future = asyncio.run_coroutine_threadsafe(_do_disconnect(), self._loop)
+                future.result()
+            self._connected = False
+        except Exception as exc:
+            print(f"Error disconnecting: {exc}")
+        finally:
+            # Stop the event loop
+            if self._loop and self._thread:
+                try:
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                except Exception:
+                    pass
+                self._thread.join(timeout=1.0)
             self._loop = None
-    
+            self._thread = None
+
     def is_connected(self) -> bool:
-        """Check if connected to device"""
+        """Return True if a connection to the device is currently active."""
         return self._connected and self.client is not None
-    
+
     def read_register(self, reg_name: str) -> Optional[int]:
-        """Read a single holding register
-        
+        """
+        Read the value of a single holding register.
+
         Args:
-            reg_name: Register name from REGISTERS dict
-            
+            reg_name: Name of the register to read, as defined in ``REGISTERS``.
+
         Returns:
-            Register value or None on error
+            The register value, or ``None`` on error or if not connected.
         """
         if not self.is_connected():
             return None
-            
         reg = self.REGISTERS.get(reg_name)
-        if not reg:
+        if reg is None:
             return None
-            
+        async def _read() -> Optional[int]:
+            rr = await self.client.read_holding_registers(
+                reg["address"], count=1, unit=self.slave_id
+            )
+            if rr.isError():
+                return None
+            value = rr.registers[0]
+            if reg.get("signed", False) and value >= 0x8000:
+                value -= 0x10000
+            return value
         try:
-            async def _read():
-                rr = await self.client.read_holding_registers(
-                    reg["address"], count=1, unit=self.slave_id
-                )
-                if rr.isError():
-                    return None
-                    
-                value = rr.registers[0]
-                if reg.get("signed", False) and value >= 0x8000:
-                    value -= 0x10000
-                return value
-            
-            return self._loop.run_until_complete(_read())
-        except Exception as e:
-            print(f"Error reading register {reg_name}: {e}")
+            future = asyncio.run_coroutine_threadsafe(_read(), self._loop)
+            return future.result()
+        except Exception as exc:
+            print(f"Error reading register {reg_name}: {exc}")
             return None
-    
+
     def write_register(self, address: int, value: int) -> bool:
-        """Write a single holding register
-        
+        """
+        Write a single holding register.
+
         Args:
-            address: Register address
-            value: Value to write (will be masked to 16-bit)
-            
+            address: Register address.
+            value: Value to write (masked to 16 bits).
+
         Returns:
-            True if successful
+            True if the write succeeded, False otherwise.
         """
         if not self.is_connected():
             return False
-            
+        async def _write() -> bool:
+            rq = await self.client.write_register(
+                address, value & 0xFFFF, unit=self.slave_id
+            )
+            return not rq.isError()
         try:
-            async def _write():
-                rq = await self.client.write_register(
-                    address, value & 0xFFFF, unit=self.slave_id
-                )
-                return not rq.isError()
-            
-            return self._loop.run_until_complete(_write())
-        except Exception as e:
-            print(f"Error writing register {address}: {e}")
+            future = asyncio.run_coroutine_threadsafe(_write(), self._loop)
+            return future.result()
+        except Exception as exc:
+            print(f"Error writing register {address}: {exc}")
             return False
-    
+
     def set_cooling_setpoint(self, value: int) -> bool:
-        """Set cooling setpoint temperature
-        
-        Args:
-            value: Temperature setpoint (-32768 to 32767)
-            
-        Returns:
-            True if successful
-        """
+        """Set the cooling setpoint temperature."""
         if value < -32768 or value > 32767:
             return False
         return self.write_register(0, value)
-    
+
     def get_temperature(self) -> Optional[float]:
-        """Get current control sensor temperature
-        
-        Returns:
-            Temperature in degrees or None on error
-        """
+        """Return the current control sensor temperature."""
         temp = self.read_register("READ_CONTROL_SENSOR")
         return float(temp) if temp is not None else None
-    
+
     def get_setpoint(self) -> Optional[float]:
-        """Get current cooling setpoint
-        
-        Returns:
-            Setpoint temperature or None on error
-        """
+        """Return the current cooling setpoint."""
         sp = self.read_register("READ_CONTROL_SETPOINT")
         return float(sp) if sp is not None else None
-    
+
     def get_status(self) -> dict[str, Any]:
-        """Get comprehensive AC status
-        
-        Returns:
-            Dictionary with status information
         """
-        status = {}
-        
-        # Read key registers
+        Get a snapshot of the current AC status.
+
+        The returned dictionary may contain the keys ``temperature``,
+        ``target``, ``power``, ``mode`` and ``fan`` depending on the
+        availability of each measurement. ``mode`` is derived from the
+        output status register.
+        """
+        status: dict[str, Any] = {}
         temp = self.get_temperature()
         setpoint = self.get_setpoint()
         output_status = self.read_register("READ_OUTPUT_STATUS")
-        
         if temp is not None:
             status["temperature"] = temp
         if setpoint is not None:
             status["target"] = setpoint
         if output_status is not None:
-            # Interpret output status bits
             status["power"] = bool(output_status & 0x01)
             status["cooling"] = bool(output_status & 0x02)
             status["heating"] = bool(output_status & 0x04)
-            
-            # Determine mode from status
             if status.get("cooling"):
                 status["mode"] = "Cool"
             elif status.get("heating"):
                 status["mode"] = "Heat"
             else:
                 status["mode"] = "Auto"
-                
-            status["fan"] = "Auto"  # Default fan mode
-        
+            status["fan"] = "Auto"
         return status
-    
+
     def power_on(self) -> bool:
-        """Turn AC power on"""
-        # Implement based on device protocol
-        # This is a placeholder - adjust based on actual device needs
+        """Turn the AC power on."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
             return self.write_register(4, enable_flags | 0x01)
         return False
-    
+
     def power_off(self) -> bool:
-        """Turn AC power off"""
-        # Implement based on device protocol
+        """Turn the AC power off."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
             return self.write_register(4, enable_flags & ~0x01)
         return False
 
     def set_temperature(self, value: int) -> bool:
-        """Set cooling setpoint temperature (alias for set_cooling_setpoint)"""
+        """Alias for ``set_cooling_setpoint``."""
         return self.set_cooling_setpoint(value)
 
     def set_mode(self, mode: str) -> bool:
-        """Set AC mode (Cool, Heat)"""
-        # This is a placeholder - adjust based on actual device needs
+        """
+        Set the AC operating mode (Cool or Heat).
+
+        Args:
+            mode: Desired mode. Only ``"cool"`` or ``"heat"`` are honoured.
+
+        Returns:
+            True if the mode change was successful, False otherwise.
+        """
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is None:
             return False
-
-        # Example: 0x02 for Cool, 0x04 for Heat
         if mode.lower() == "cool":
             return self.write_register(4, (enable_flags & ~0x04) | 0x02)
         elif mode.lower() == "heat":
@@ -261,16 +294,15 @@ class ACModbusWrapper:
         return False
 
     def set_fan_speed(self, speed: str) -> bool:
-        """Set fan speed"""
-        # This is a placeholder - fan speed control is not defined in the register map
+        """Placeholder for future fan speed control; always returns True."""
         print(f"Fan speed control not implemented. Received: {speed}")
         return True
-    
-    def __enter__(self):
-        """Context manager entry"""
+
+    def __enter__(self) -> "ACModbusWrapper":
+        """Enter context: connect to the device."""
         self.connect()
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context: disconnect from the device."""
         self.disconnect()
