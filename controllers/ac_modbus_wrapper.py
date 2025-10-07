@@ -129,8 +129,20 @@ class ACModbusWrapper:
         if not self._connected:
             return
         async def _do_disconnect() -> None:
+            """
+            Coroutine used to close the underlying Modbus client.
+
+            In pymodbus 3.11.x the asynchronous client exposes a synchronous
+            ``close()`` method rather than an awaitable coroutine. Calling
+            ``await self.client.close()`` will therefore raise a ``TypeError``
+            (``object NoneType can't be used in 'await' expression``).  To
+            accommodate this, simply invoke ``close()`` without awaiting.  The
+            call is performed inside the event loop thread to ensure thread
+            safety.
+            """
             if self.client:
-                await self.client.close()
+                # close() is synchronous in pymodbus 3.11.x
+                self.client.close()
         try:
             if self._loop and self._thread and self._thread.is_alive():
                 future = asyncio.run_coroutine_threadsafe(_do_disconnect(), self._loop)
@@ -169,12 +181,27 @@ class ACModbusWrapper:
         if reg is None:
             return None
         async def _read() -> Optional[int]:
+            """
+            Inner coroutine to perform the register read.
+
+            Newer versions of pymodbus have renamed the ``unit`` parameter to
+            ``device_id`` (or ``slave``). Passing the deprecated ``unit``
+            parameter will raise a ``TypeError`` such as::
+
+                ModbusClientMixin.read_holding_registers() got an unexpected
+                keyword argument 'unit'
+
+            To maintain compatibility with pymodbus >=3.11, we pass
+            ``device_id`` instead of ``unit``.
+            """
             rr = await self.client.read_holding_registers(
-                reg["address"], count=1, unit=self.slave_id
+                reg["address"], count=1, device_id=self.slave_id
             )
+            # If the response indicates an error, propagate None
             if rr.isError():
                 return None
             value = rr.registers[0]
+            # Apply two's complement conversion for signed values
             if reg.get("signed", False) and value >= 0x8000:
                 value -= 0x10000
             return value
@@ -199,9 +226,17 @@ class ACModbusWrapper:
         if not self.is_connected():
             return False
         async def _write() -> bool:
+            """
+            Inner coroutine to perform the register write.
+
+            Similar to the read path, newer versions of pymodbus renamed
+            ``unit`` to ``device_id``. Passing ``unit`` will raise a
+            ``TypeError``.  We therefore supply ``device_id`` explicitly.
+            """
             rq = await self.client.write_register(
-                address, value & 0xFFFF, unit=self.slave_id
+                address, value & 0xFFFF, device_id=self.slave_id
             )
+            # ``isError()`` returns True when an error reply is received
             return not rq.isError()
         try:
             future = asyncio.run_coroutine_threadsafe(_write(), self._loop)
