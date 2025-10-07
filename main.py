@@ -14,9 +14,10 @@ from controllers.thp_controller import THPController
 from controllers.motor_controller import MotorController
 from workers import EmailWorker
 from data_model import SensorDataModel
+from ui.ac_control_widget import ACControlWidget
+from PyQt5.QtWidgets import QDockWidget
 
 class MainWindow(QMainWindow):
-    # Signal to trigger the email worker
     request_send_email = pyqtSignal()
 
     def __init__(self):
@@ -24,23 +25,25 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(config.APP_NAME)
         self.setMinimumSize(*config.MIN_WINDOW_SIZE)
 
-        # Initialize core components
         self.data_model = SensorDataModel()
         self.setup_email_worker()
         
-        # State flags
         self.was_raining = False
         self.email_sent_for_current_event = False
         self.current_motor_position = None # 0 for closed, 90 for open
 
-        # Setup UI
         self.setup_ui()
         self.connect_signals_and_slots()
 
-        # Initialize devices and timers
         self.initialize_controllers()
         self.initialize_timers()
         self.startup_check()
+
+        self.ac_tab = ACControlWidget(self)
+        try:
+            self.tabs.addTab(self.ac_tab, "AC Control")
+        except AttributeError:
+            self.setCentralWidget(self.ac_tab)
 
     def setup_ui(self):
         """Main UI setup method."""

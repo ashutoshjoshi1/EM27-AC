@@ -4,15 +4,12 @@ from typing import Optional
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer
 
 from controllers.ac_adapter import ACAdapter
-try:
-    from AC import AC
-except Exception:
-    from ..AC import AC
+
 
 class ACService(QObject):
     status = pyqtSignal(dict)
     error = pyqtSignal(str)
-    connected = pyqtSignal()
+    connected = pyqtSignal(bool)
 
     def __init__(self, port: Optional[AC] = None, poll_ms: int = 1000, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -44,9 +41,11 @@ class ACService(QObject):
             self._thread.wait(2000)
 
     @pyqtSlot()
-    def connect_device(self) --> None:
+    def connect_device(self) -> None:
         try:
-            ac = AC(self._port) if self._port else AC()
+            # Import AC wrapper from modbus implementation
+            from controllers.ac_modbus_wrapper import ACModbusWrapper
+            ac = ACModbusWrapper(self._port) if self._port else ACModbusWrapper()
             self._adapter = ACAdapter(ac)
             if self._port:
                 try:
@@ -61,11 +60,12 @@ class ACService(QObject):
             self._poll_now()
         except Exception as e:
             self.error.emit(f"Error connecting to device: {e}")
+            self.connected.emit(False)
 
     @pyqtSlot()
-    def _on_started(self) -> None:
+    def disconnect_device(self) -> None:
         try:
-            if self._pool_timer:
+            if self._poll_timer:
                 self._poll_timer.stop()
             if self._adapter:
                 self._adapter.disconnect()
@@ -74,7 +74,7 @@ class ACService(QObject):
             self.error.emit(f"Error during disconnect: {e}")
 
     @pyqtSlot(bool)
-    def _set_power(self, on:bool) --> None:
+    def set_power(self, on: bool) -> None:
         try:
             if self._adapter:
                 self._adapter.power(on)
@@ -83,7 +83,7 @@ class ACService(QObject):
             self.error.emit(f"Error in setting power: {e}")
     
     @pyqtSlot(str)
-    def _set_mode(self, mode:str) --> None:
+    def set_mode(self, mode: str) -> None:
         try:
             if self._adapter:
                 self._adapter.set_mode(mode)
@@ -91,17 +91,16 @@ class ACService(QObject):
         except Exception as e:
             self.error.emit(f"Error in setting mode: {e}")
 
-    @pyqtSlot(int)
-    def _set_temperature(self, value: float) --> None:
+    @pyqtSlot(float)
+    def set_temperature(self, value: float) -> None:
         try:
             if self._adapter:
-                self._adapter.set_temperature(value)
+                self._adapter.set_temperature(int(value))
                 self._poll_now()
         except Exception as e:
             self.error.emit(f"Error in setting temperature: {e}")
     
-    @pyqtSlot(str|int)
-    def _set_fan_speed(self, speed: str|int) --> None:
+    def set_fan(self, speed: str) -> None:
         try:
             if self._adapter:
                 self._adapter.set_fan_speed(speed)
@@ -116,7 +115,7 @@ class ACService(QObject):
         self._poll_timer.timeout.connect(self._poll_now)
 
     @pyqtSlot()
-    def _poll_now(self) --> None:
+    def _poll_now(self) -> None:
         if not self._adapter:
             return
         try:
@@ -124,6 +123,3 @@ class ACService(QObject):
             self.status.emit(status)
         except Exception as e:
             self.error.emit(f"Error polling device: {e}")
-
-
-
