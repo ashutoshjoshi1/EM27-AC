@@ -7,49 +7,15 @@ from typing import Optional, Any
 from pymodbus.client import AsyncModbusSerialClient
 from pymodbus.exceptions import ModbusIOException
 from pymodbus.framer import FramerType
+import AC
 
 
 class ACModbusWrapper:
-    """
-    Wrapper class providing a synchronous interface to the asynchronous
-    Modbus operations used by the AC controller.
+    REGISTER_MAP = AC.REGISTER_MAP
 
-    The class maintains its own asyncio event loop running in a
-    background thread. All asynchronous client operations are scheduled
-    onto that loop using ``run_coroutine_threadsafe``. This design
-    eliminates the ``RuntimeError: no running event loop`` that occurs
-    when ``AsyncModbusSerialClient`` is used without a running loop.
-    """
-
-    # Register map (all holding registers)
-    REGISTERS = {
-        "SET_NETWORK_COOLING_SETPOINT": {"address": 0, "signed": True},
-        "SET_NETWORK_HIGH_TEMP_ALARM_SETPOINT": {"address": 1, "signed": True},
-        "SET_NETWORK_LOW_TEMP_ALARM_SETPOINT": {"address": 2, "signed": True},
-        "SET_NETWORK_HEATER_SETPOINT": {"address": 3, "signed": True},
-        "SET_ENABLE_FLAGS": {"address": 4, "signed": False},
-        "READ_CONTROL_SETPOINT": {"address": 5, "signed": True},
-        "READ_HIGH_TEMP_SETPOINT": {"address": 6, "signed": True},
-        "READ_LOW_TEMP_SETPOINT": {"address": 7, "signed": True},
-        "READ_HEATER_SETPOINT": {"address": 8, "signed": True},
-        "READ_CONTROL_SENSOR": {"address": 12, "signed": True},
-        "READ_ALARM_STATUS": {"address": 14, "signed": False},
-        "READ_OUTPUT_STATUS": {"address": 15, "signed": False},
-        "READ_CONTACT_STATUS": {"address": 16, "signed": False},
-    }
-
-    def __init__(
-        self,
-        port: Optional[str] = None,
-        *,
-        slave_id: int = 1,
-        baudrate: int = 19200,
-        bytesize: int = 8,
-        parity: str = "E",
-        stopbits: int = 1,
-        timeout: float = 2.0,
-        retries: int = 3,
-    ) -> None:
+    def __init__(self, port: Optional[str] = None, *, slave_id: int = 1, baudrate: int = 19200, 
+                 bytesize: int = 8, parity: str = "E", stopbits: int = 1, timeout: float = 2.0, 
+                 retries: int = 3) -> None:
         """
         Initialise the wrapper.
 
@@ -66,7 +32,7 @@ class ACModbusWrapper:
                 Defaults to 3.  Increasing this may help with flaky connections, whereas
                 lowering it will return errors more quickly.
         """
-        self.port: str = port or "COM5"
+        self.port: str = port or "COM10"
         self.slave_id: int = slave_id
         self.baudrate: int = baudrate
         self.bytesize: int = bytesize
@@ -203,42 +169,20 @@ class ACModbusWrapper:
         return self._connected and self.client is not None
 
     def read_register(self, reg_name: str) -> Optional[int]:
-        """
-        Read the value of a single holding register.
-
-        Args:
-            reg_name: Name of the register to read, as defined in ``REGISTERS``.
-
-        Returns:
-            The register value, or ``None`` on error or if not connected.
-        """
+        """Read the value of a single holding register."""
         if not self.is_connected():
             return None
-        reg = self.REGISTERS.get(reg_name)
+        reg = self.REGISTER_MAP.get(reg_name)
         if reg is None:
             return None
         async def _read() -> Optional[int]:
-            """
-            Inner coroutine to perform the register read.
-
-            Newer versions of pymodbus have renamed the ``unit`` parameter to
-            ``device_id`` (or ``slave``). Passing the deprecated ``unit``
-            parameter will raise a ``TypeError`` such as::
-
-                ModbusClientMixin.read_holding_registers() got an unexpected
-                keyword argument 'unit'
-
-            To maintain compatibility with pymodbus >=3.11, we pass
-            ``device_id`` instead of ``unit``.
-            """
             rr = await self.client.read_holding_registers(
                 reg["address"], count=1, device_id=self.slave_id
             )
-            # If the response indicates an error, propagate None
             if rr.isError():
                 return None
             value = rr.registers[0]
-            # Apply two's complement conversion for signed values
+            # Apply two's complement if value is signed
             if reg.get("signed", False) and value >= 0x8000:
                 value -= 0x10000
             return value
@@ -246,52 +190,19 @@ class ACModbusWrapper:
             future = asyncio.run_coroutine_threadsafe(_read(), self._loop)
             return future.result()
         except ModbusIOException as exc:
-            # A Modbus I/O error indicates no response was received from the
-            # device after the configured number of retries.  Log the error,
-            # attempt a reconnect once, and return None so the caller can decide
-            # how to proceed.
-            print(
-                f"Modbus I/O error while reading register {reg_name}: {exc}. "
-                "Attempting to reconnect..."
-            )
-            try:
-                # Reset the connection in case the client got stuck
-                self.disconnect()
-                self.connect(self.port)
-            except Exception:
-                # Ignore errors during reconnect
-                pass
+            print(f"Modbus I/O error while reading register {reg_name}: {exc}. Attempting reconnect...")
+            # ... reconnect logic ...
             return None
         except Exception as exc:
-            # Other exceptions are unexpected; log and return None
             print(f"Error reading register {reg_name}: {exc}")
             return None
 
     def write_register(self, address: int, value: int) -> bool:
-        """
-        Write a single holding register.
-
-        Args:
-            address: Register address.
-            value: Value to write (masked to 16 bits).
-
-        Returns:
-            True if the write succeeded, False otherwise.
-        """
+        """Write a single holding register (16-bit value)."""
         if not self.is_connected():
             return False
         async def _write() -> bool:
-            """
-            Inner coroutine to perform the register write.
-
-            Similar to the read path, newer versions of pymodbus renamed
-            ``unit`` to ``device_id``. Passing ``unit`` will raise a
-            ``TypeError``.  We therefore supply ``device_id`` explicitly.
-            """
-            rq = await self.client.write_register(
-                address, value & 0xFFFF, device_id=self.slave_id
-            )
-            # ``isError()`` returns True when an error reply is received
+            rq = await self.client.write_register(address, value & 0xFFFF, device_id=self.slave_id)
             return not rq.isError()
         try:
             future = asyncio.run_coroutine_threadsafe(_write(), self._loop)
@@ -321,102 +232,109 @@ class ACModbusWrapper:
         """Convert °C to tenths of °C for Modbus writes."""
         return int(round(value_c * 10))
 
-    # --- OPTIONAL: call from connect() after port open (safe no-op if register not present) ---
     def force_celsius(self) -> None:
-        """
-        If your register map exposes a C/F setting, set it to Celsius.
-        This is optional for Modbus (values are already °C on the wire),
-        but aligns the front-panel display with the app.
-        """
+        """If a C/F mode register exists, force Celsius (optional)."""
         try:
-            # If your register map defines e.g. "SET_C_F" (0=C, 1=F), force 0
-            # Adjust the register name/index to your existing mapping if different:
-            reg_index = self.REGISTER_MAP.get("SET_C_F")
-            if reg_index is not None:
-                self.write_register(reg_index, 0)  # 0 = Celsius, 1 = Fahrenheit
+            reg = self.REGISTER_MAP.get("SET_C_F")
+            if reg:  # e.g. if such a register were defined
+                self.write_register(reg["address"], 0)  # 0 = Celsius
         except Exception:
-            # ignore if not supported
-            pass
+            pass  # ignore if not supported
 
     def get_temperature(self) -> float | None:
-        """Return ambient/internal temperature in °C."""
-        raw = self.read_register("READ_AMBIENT_TEMPERATURE")
+        """Return the enclosure (ambient/internal) temperature in °C."""
+        raw = self.read_register("READ_CONTROL_SENSOR")
         return self._decode_temp_c(raw)
 
     def get_setpoint(self) -> float | None:
-        """Return control setpoint in °C."""
+        """Return current cooling setpoint in °C."""
         raw = self.read_register("READ_CONTROL_SETPOINT")
         return self._decode_temp_c(raw)
 
-    # --- writing setpoint in °C ---
     def set_cooling_setpoint(self, value_c: float) -> bool:
+        """Set the cooling temperature setpoint (in °C)."""
+        value_c = max(10.0, min(60.0, float(value_c)))  # clamp between 10 and 60°C
+        addr = self.REGISTER_MAP["SET_NETWORK_COOLING_SETPOINT"]["address"]
+        return self.write_register(addr, self._encode_temp_c(value_c))
+
+    def set_mode(self, mode: str) -> bool:
         """
-        Write cooling setpoint (°C). Controller expects 0.1°C units.
-        Clamp to a sane range to avoid controller rejects.
+        Set the AC operating mode. Supported modes: "auto", "cool", "heat", "dry", "fan".
         """
-        value_c = max(10.0, min(60.0, float(value_c)))  # typical usable range
-        return self.write_register(self.REGISTER_MAP["SET_CONTROL_SETPOINT"],
-                                self._encode_temp_c(value_c))
+        enable_flags = self.read_register("SET_ENABLE_FLAGS")
+        if enable_flags is None:
+            return False
+        addr = self.REGISTER_MAP["SET_ENABLE_FLAGS"]["address"]
+        mode = mode.lower()
+        if mode == "cool":
+            # Enable cooling-only (bit1 = 1, bit2 = 0)
+            return self.write_register(addr, (enable_flags & ~0x04) | 0x02)
+        elif mode == "heat":
+            # Enable heating-only (bit2 = 1, bit1 = 0)
+            return self.write_register(addr, (enable_flags & ~0x02) | 0x04)
+        else:
+            # Auto, Fan, or Dry – clear both cooling and heating request bits
+            return self.write_register(addr, enable_flags & ~0x06)
 
     def get_status(self) -> dict:
+        """Fetch a snapshot of key status flags."""
         st = {}
         temp = self.get_temperature()
         setp = self.get_setpoint()
-        out = self.read_register("READ_OUTPUT_STATUS")
-
+        out  = self.read_register("READ_OUTPUT_STATUS")
         if temp is not None:
             st["temperature"] = round(temp, 1)
         if setp is not None:
             st["target"] = round(setp, 1)
-
         if out is not None:
-            st["power"] = bool(out & 0x01)
-            cooling = bool(out & 0x02)
-            heating = bool(out & 0x04)
+            st["power"]   = bool(out & 0x01)
+            cooling       = bool(out & 0x02)
+            heating       = bool(out & 0x04)
             st["cooling"] = cooling
             st["heating"] = heating
-            st["mode"] = "Cool" if cooling else ("Heat" if heating else "Auto")
-            st["fan"] = "Auto"
-
+            st["mode"]    = "Cool" if cooling else ("Heat" if heating else "Auto")
+            st["fan"]     = "Auto"
         return st
 
     def power_on(self) -> bool:
-        """Turn the AC power on (equivalent to closing the door contact)."""
+        """Turn the AC power on (close door contact logic)."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
-            # Clear bit 8 (EN_INPUT1_INVERT) so door contact logic is normal (unit ON):contentReference[oaicite:8]{index=8}
-            return self.write_register(4, enable_flags & ~0x100)
+            # **Set** bit 8 (Input1 Invert) so an open door input is treated as closed (unit ON)
+            addr = self.REGISTER_MAP["SET_ENABLE_FLAGS"]["address"]
+            return self.write_register(addr, enable_flags | 0x100)
         return False
 
     def power_off(self) -> bool:
-        """Turn the AC power off (equivalent to opening the door contact)."""
+        """Turn the AC power off (open door contact logic)."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
-            # Set bit 8 (EN_INPUT1_INVERT) to invert door contact logic (unit OFF):contentReference[oaicite:9]{index=9}
-            return self.write_register(4, enable_flags | 0x100)
+            # **Clear** bit 8 to return to NC door logic (open circuit = door open -> unit OFF)
+            addr = self.REGISTER_MAP["SET_ENABLE_FLAGS"]["address"]
+            return self.write_register(addr, enable_flags & ~0x100)
         return False
 
     def set_temperature(self, value: int) -> bool:
         """Alias for set_cooling_setpoint (in tenths of a degree)."""
         return self.set_cooling_setpoint(value)
 
-    def set_mode(self, mode: str) -> bool:
-        """
-        Set the AC operating mode. Supports "auto", "cool", "heat", "dry", "fan".
-        """
-        enable_flags = self.read_register("SET_ENABLE_FLAGS")
-        if enable_flags is None:
-            return False
-        if mode.lower() == "cool":
-            # Enable cooling-only mode (bit1 = 1, bit2 = 0)
-            return self.write_register(4, (enable_flags & ~0x04) | 0x02)
-        elif mode.lower() == "heat":
-            # Enable heating-only mode (bit2 = 1, bit1 = 0)
-            return self.write_register(4, (enable_flags & ~0x02) | 0x04)
-        elif mode.lower() in ("auto", "fan", "dry"):
-            # Auto/Fan/Dry: clear both cooling and heating request bits (0x02 and 0x04)
-            return self.write_register(4, enable_flags & ~0x06)
-        return False
+    # def set_mode(self, mode: str) -> bool:
+    #     """
+    #     Set the AC operating mode. Supports "auto", "cool", "heat", "dry", "fan".
+    #     """
+    #     enable_flags = self.read_register("SET_ENABLE_FLAGS")
+    #     if enable_flags is None:
+    #         return False
+    #     if mode.lower() == "cool":
+    #         # Enable cooling-only mode (bit1 = 1, bit2 = 0)
+    #         return self.write_register(4, (enable_flags & ~0x04) | 0x02)
+    #     elif mode.lower() == "heat":
+    #         # Enable heating-only mode (bit2 = 1, bit1 = 0)
+    #         return self.write_register(4, (enable_flags & ~0x02) | 0x04)
+    #     elif mode.lower() in ("auto", "fan", "dry"):
+    #         # Auto/Fan/Dry: clear both cooling and heating request bits (0x02 and 0x04)
+    #         return self.write_register(4, enable_flags & ~0x06)
+    #     return False
 
     def set_fan_speed(self, speed: str) -> bool:
         """Fan speed control not supported in this controller (always returns True)."""

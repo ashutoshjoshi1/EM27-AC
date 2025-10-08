@@ -6,17 +6,16 @@ class ACAdapter:
         self._device = device
 
     def connect(self, *args, **kwargs) -> bool:
-        """Connect to the AC device. Returns True if successful, False otherwise."""
+        """Connect to the AC device. Returns True if successful."""
         if not self._device:
             return False
-        # Attempt connection on underlying device
         result = self._device.connect(*args, **kwargs) if hasattr(self._device, "connect") else False
-        # If connected, enable network setpoints so Modbus-set values take effect
         if result and hasattr(self._device, "read_register") and hasattr(self._device, "write_register"):
             flags = self._device.read_register("SET_ENABLE_FLAGS")
             if flags is not None:
-                # Set bit 9 (EN_NETWORK_SETPOINTS) to use Modbus setpoints for control:contentReference[oaicite:6]{index=6}:contentReference[oaicite:7]{index=7}
-                self._device.write_register(4, flags | 0x200)
+                # Set bit 9 (EN_NETWORK_SETPOINTS) so Modbus-setpoints are used for control:contentReference[oaicite:10]{index=10}
+                addr = self._device.REGISTER_MAP["SET_ENABLE_FLAGS"]["address"]
+                self._device.write_register(addr, flags | 0x200)
         return result
 
     def disconnect(self) -> None:

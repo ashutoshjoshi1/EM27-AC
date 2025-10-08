@@ -28,6 +28,10 @@ REGISTERS = [
     {"name": "READ_CONTACT_STATUS", "address": 16, "signed": False},
 ]
 
+# Central dictionary for quick lookup of addresses and sign info
+REGISTER_MAP = {reg["name"]: {"address": reg["address"], "signed": reg["signed"]} 
+                for reg in REGISTERS}
+
 
 async def read_register(client, reg, slave_id: int):
     """Read a single holding register with signed/unsigned handling."""
