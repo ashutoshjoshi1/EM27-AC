@@ -36,19 +36,21 @@ class ACService(QObject):
                 self._thread.quit()
                 self._thread.wait(2000)
 
-    @pyqtSlot(str)
-    def connect_device(self, port: str) -> None:
+    @pyqtSlot(str, int)
+    def connect_device(self, port: str, modbus_id: int) -> None:
+        """Attempt to connect to the AC device on the given serial port and Modbus ID."""
         try:
-            # If a port is provided from the UI, update the internal port reference
             if port:
                 self._port = port
-
             from controllers.ac_modbus_wrapper import ACModbusWrapper
-            ac = ACModbusWrapper(self._port)
+            ac = ACModbusWrapper(self._port, slave_id=modbus_id)
             self._adapter = ACAdapter(ac)
-            self._adapter.connect(self._port)
+            connected = self._adapter.connect(self._port)
+            if not connected:
+                # If no response, raise an exception to trigger error signal
+                raise Exception("No response from AC unit (check connection and address)")
             self.connected.emit(True)
-            self.poll_now()  # Poll once on connect
+            self.poll_now()  # Initial poll on successful connect
         except Exception as e:
             self.error.emit(f"Error connecting to device: {e}")
             self.connected.emit(False)
@@ -70,7 +72,7 @@ class ACService(QObject):
                 self.poll_now()
             except Exception as e:
                 self.error.emit(f"Error in setting power: {e}")
-    
+
     @pyqtSlot(str)
     def set_mode(self, mode: str) -> None:
         if self._adapter:
@@ -84,11 +86,13 @@ class ACService(QObject):
     def set_temperature(self, value: float) -> None:
         if self._adapter:
             try:
+                # Convert float (from UI spinner) to int (tenths of degree for Modbus)
                 self._adapter.set_temperature(int(value))
                 self.poll_now()
             except Exception as e:
                 self.error.emit(f"Error in setting temperature: {e}")
-    
+
+    @pyqtSlot()
     def set_fan(self, speed: str) -> None:
         if self._adapter:
             try:
