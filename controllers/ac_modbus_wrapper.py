@@ -310,49 +310,75 @@ class ACModbusWrapper:
         except Exception as exc:
             print(f"Error writing register {address}: {exc}")
             return False
+        
+    def _decode_temp_c(self, raw: int | None) -> float | None:
+        """Modbus temps are in tenths of °C; convert to °C."""
+        if raw is None:
+            return None
+        return float(raw) / 10.0
 
-    def set_cooling_setpoint(self, value: int) -> bool:
-        """Set the cooling setpoint temperature."""
-        if value < -32768 or value > 32767:
-            return False
-        return self.write_register(0, value)
+    def _encode_temp_c(self, value_c: float) -> int:
+        """Convert °C to tenths of °C for Modbus writes."""
+        return int(round(value_c * 10))
 
-    def get_temperature(self) -> Optional[float]:
-        """Return the current control sensor temperature."""
-        temp = self.read_register("READ_CONTROL_SENSOR")
-        return float(temp) if temp is not None else None
-
-    def get_setpoint(self) -> Optional[float]:
-        """Return the current cooling setpoint."""
-        sp = self.read_register("READ_CONTROL_SETPOINT")
-        return float(sp) if sp is not None else None
-
-    def get_status(self) -> dict[str, Any]:
+    # --- OPTIONAL: call from connect() after port open (safe no-op if register not present) ---
+    def force_celsius(self) -> None:
         """
-        Get a snapshot of the current AC status.
-        Returns keys: "temperature", "target", "power", "mode", "fan".
+        If your register map exposes a C/F setting, set it to Celsius.
+        This is optional for Modbus (values are already °C on the wire),
+        but aligns the front-panel display with the app.
         """
-        status: dict[str, Any] = {}
+        try:
+            # If your register map defines e.g. "SET_C_F" (0=C, 1=F), force 0
+            # Adjust the register name/index to your existing mapping if different:
+            reg_index = self.REGISTER_MAP.get("SET_C_F")
+            if reg_index is not None:
+                self.write_register(reg_index, 0)  # 0 = Celsius, 1 = Fahrenheit
+        except Exception:
+            # ignore if not supported
+            pass
+
+    def get_temperature(self) -> float | None:
+        """Return ambient/internal temperature in °C."""
+        raw = self.read_register("READ_AMBIENT_TEMPERATURE")
+        return self._decode_temp_c(raw)
+
+    def get_setpoint(self) -> float | None:
+        """Return control setpoint in °C."""
+        raw = self.read_register("READ_CONTROL_SETPOINT")
+        return self._decode_temp_c(raw)
+
+    # --- writing setpoint in °C ---
+    def set_cooling_setpoint(self, value_c: float) -> bool:
+        """
+        Write cooling setpoint (°C). Controller expects 0.1°C units.
+        Clamp to a sane range to avoid controller rejects.
+        """
+        value_c = max(10.0, min(60.0, float(value_c)))  # typical usable range
+        return self.write_register(self.REGISTER_MAP["SET_CONTROL_SETPOINT"],
+                                self._encode_temp_c(value_c))
+
+    def get_status(self) -> dict:
+        st = {}
         temp = self.get_temperature()
-        setpoint = self.get_setpoint()
-        output_status = self.read_register("READ_OUTPUT_STATUS")
+        setp = self.get_setpoint()
+        out = self.read_register("READ_OUTPUT_STATUS")
+
         if temp is not None:
-            status["temperature"] = temp
-        if setpoint is not None:
-            status["target"] = setpoint
-        if output_status is not None:
-            # Interpret output status bits (bit0: Heater on, bit1: Cooling on, etc.)
-            status["power"] = bool(output_status & 0x01)
-            status["cooling"] = bool(output_status & 0x02)
-            status["heating"] = bool(output_status & 0x04)
-            if status.get("cooling"):
-                status["mode"] = "Cool"
-            elif status.get("heating"):
-                status["mode"] = "Heat"
-            else:
-                status["mode"] = "Auto"
-            status["fan"] = "Auto"
-        return status
+            st["temperature"] = round(temp, 1)
+        if setp is not None:
+            st["target"] = round(setp, 1)
+
+        if out is not None:
+            st["power"] = bool(out & 0x01)
+            cooling = bool(out & 0x02)
+            heating = bool(out & 0x04)
+            st["cooling"] = cooling
+            st["heating"] = heating
+            st["mode"] = "Cool" if cooling else ("Heat" if heating else "Auto")
+            st["fan"] = "Auto"
+
+        return st
 
     def power_on(self) -> bool:
         """Turn the AC power on (equivalent to closing the door contact)."""

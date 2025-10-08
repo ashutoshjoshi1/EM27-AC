@@ -58,12 +58,17 @@ class ACControlWidget(QWidget):
         self.cmb_mode.addItems(["Auto", "Cool", "Heat", "Dry", "Fan"])
         self.cmb_fan = QComboBox()
         self.cmb_fan.addItems(["Auto", "Low", "Medium", "High"])
+        # Setpoint controls in °C
         self.temp_slider = QSlider(Qt.Horizontal)
-        self.temp_slider.setRange(16, 30)  # range in °C
+        self.temp_slider.setRange(10, 60)       # °C
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setDecimals(1)
-        self.temp_spin.setRange(16.0, 30.0)
+        self.temp_spin.setRange(10.0, 60.0)     # °C
         self.temp_spin.setSingleStep(0.5)
+
+        # wiring
+        
+
         ctrl_layout.addWidget(self.chk_power, 0, 0)
         ctrl_layout.addWidget(QLabel("Mode"), 0, 1)
         ctrl_layout.addWidget(self.cmb_mode, 0, 2)
@@ -95,7 +100,7 @@ class ACControlWidget(QWidget):
         self.btn_disconnect.clicked.connect(self._on_disconnect)
         self.chk_power.toggled.connect(self.svc.set_power)
         self.cmb_mode.currentTextChanged.connect(self.svc.set_mode)
-        self.cmb_fan.currentTextChanged.connect(self.svc.set_fan)
+        self.cmb_fan.currentTextChanged.connect(self.svc.set_fan)  # passes str to @pyqtSlot(str)
         self.temp_slider.valueChanged.connect(lambda v: self.temp_spin.setValue(float(v)))
         self.temp_spin.valueChanged.connect(self._on_temp_changed)
         self.svc.status.connect(self._on_status)
@@ -144,21 +149,17 @@ class ACControlWidget(QWidget):
                     self.cmb_fan.setCurrentIndex(idx)
                 self.cmb_fan.blockSignals(False)
         if "target" in s and s["target"] is not None:
-            self.lbl_target.setText(f"Target: {s['target']} °C")
-            try:
-                target_val = float(s["target"])
-                # Sync slider/spin to the reported setpoint
-                self.temp_slider.blockSignals(True)
-                self.temp_spin.blockSignals(True)
-                if int(round(target_val)) != self.temp_slider.value():
-                    self.temp_slider.setValue(int(round(target_val)))
-                if self.temp_spin.value() != target_val:
-                    self.temp_spin.setValue(target_val)
-            finally:
-                self.temp_slider.blockSignals(False)
-                self.temp_spin.blockSignals(False)
+            tgt = float(s["target"])
+            self.lbl_target.setText(f"Target: {tgt:.1f} °C")
+            self.temp_slider.blockSignals(True)
+            self.temp_spin.blockSignals(True)
+            self.temp_slider.setValue(int(round(tgt)))
+            self.temp_spin.setValue(tgt)
+            self.temp_slider.blockSignals(False)
+            self.temp_spin.blockSignals(False)
         if "temperature" in s and s["temperature"] is not None:
-            self.lbl_temp.setText(f"Ambient: {s['temperature']} °C")
+            amb = float(s["temperature"])
+            self.lbl_temp.setText(f"Ambient: {amb:.1f} °C")
 
     def _on_error(self, msg: str) -> None:
         # Display error messages (e.g., connection failures)

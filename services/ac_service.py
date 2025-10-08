@@ -83,16 +83,16 @@ class ACService(QObject):
                 self.error.emit(f"Error in setting mode: {e}")
 
     @pyqtSlot(float)
-    def set_temperature(self, value: float) -> None:
+    def set_temperature(self, value_c: float) -> None:
+        """Value from UI is already °C; forward as °C."""
         if self._adapter:
             try:
-                # Convert float (from UI spinner) to int (tenths of degree for Modbus)
-                self._adapter.set_temperature(int(value))
+                self._adapter.set_temperature(float(value_c))
                 self.poll_now()
             except Exception as e:
                 self.error.emit(f"Error in setting temperature: {e}")
 
-    @pyqtSlot()
+    @pyqtSlot(str)  # <<< FIX: accept the string from QComboBox.currentTextChanged
     def set_fan(self, speed: str) -> None:
         if self._adapter:
             try:
