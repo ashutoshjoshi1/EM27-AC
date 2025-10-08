@@ -75,5 +75,3 @@ class ACAdapter:
             return {}
         return self._device.get_status()
 
-    # (Internal helper methods _get, _has, _call omitted for brevity – not used in this context)
-}

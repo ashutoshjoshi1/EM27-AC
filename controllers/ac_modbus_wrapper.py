@@ -330,11 +330,7 @@ class ACModbusWrapper:
     def get_status(self) -> dict[str, Any]:
         """
         Get a snapshot of the current AC status.
-
-        The returned dictionary may contain the keys ``temperature``,
-        ``target``, ``power``, ``mode`` and ``fan`` depending on the
-        availability of each measurement. ``mode`` is derived from the
-        output status register.
+        Returns keys: "temperature", "target", "power", "mode", "fan".
         """
         status: dict[str, Any] = {}
         temp = self.get_temperature()
@@ -345,6 +341,7 @@ class ACModbusWrapper:
         if setpoint is not None:
             status["target"] = setpoint
         if output_status is not None:
+            # Interpret output status bits (bit0: Heater on, bit1: Cooling on, etc.)
             status["power"] = bool(output_status & 0x01)
             status["cooling"] = bool(output_status & 0x02)
             status["heating"] = bool(output_status & 0x04)
@@ -358,44 +355,45 @@ class ACModbusWrapper:
         return status
 
     def power_on(self) -> bool:
-        """Turn the AC power on."""
+        """Turn the AC power on (equivalent to closing the door contact)."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
-            return self.write_register(4, enable_flags | 0x01)
+            # Clear bit 8 (EN_INPUT1_INVERT) so door contact logic is normal (unit ON):contentReference[oaicite:8]{index=8}
+            return self.write_register(4, enable_flags & ~0x100)
         return False
 
     def power_off(self) -> bool:
-        """Turn the AC power off."""
+        """Turn the AC power off (equivalent to opening the door contact)."""
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is not None:
-            return self.write_register(4, enable_flags & ~0x01)
+            # Set bit 8 (EN_INPUT1_INVERT) to invert door contact logic (unit OFF):contentReference[oaicite:9]{index=9}
+            return self.write_register(4, enable_flags | 0x100)
         return False
 
     def set_temperature(self, value: int) -> bool:
-        """Alias for ``set_cooling_setpoint``."""
+        """Alias for set_cooling_setpoint (in tenths of a degree)."""
         return self.set_cooling_setpoint(value)
 
     def set_mode(self, mode: str) -> bool:
         """
-        Set the AC operating mode (Cool or Heat).
-
-        Args:
-            mode: Desired mode. Only ``"cool"`` or ``"heat"`` are honoured.
-
-        Returns:
-            True if the mode change was successful, False otherwise.
+        Set the AC operating mode. Supports "auto", "cool", "heat", "dry", "fan".
         """
         enable_flags = self.read_register("SET_ENABLE_FLAGS")
         if enable_flags is None:
             return False
         if mode.lower() == "cool":
+            # Enable cooling-only mode (bit1 = 1, bit2 = 0)
             return self.write_register(4, (enable_flags & ~0x04) | 0x02)
         elif mode.lower() == "heat":
+            # Enable heating-only mode (bit2 = 1, bit1 = 0)
             return self.write_register(4, (enable_flags & ~0x02) | 0x04)
+        elif mode.lower() in ("auto", "fan", "dry"):
+            # Auto/Fan/Dry: clear both cooling and heating request bits (0x02 and 0x04)
+            return self.write_register(4, enable_flags & ~0x06)
         return False
 
     def set_fan_speed(self, speed: str) -> bool:
-        """Placeholder for future fan speed control; always returns True."""
+        """Fan speed control not supported in this controller (always returns True)."""
         print(f"Fan speed control not implemented. Received: {speed}")
         return True
 
