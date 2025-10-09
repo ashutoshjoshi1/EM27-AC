@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import inspect
+import threading, time
+from contextlib import suppress
 
 # ---- pymodbus compatibility (3.x preferred; 2.x fallback) ----
 try:
@@ -10,6 +12,13 @@ try:
 except Exception:
     from pymodbus.client.sync import ModbusSerialClient  # 2.x
 from pymodbus.exceptions import ModbusException
+
+# pyserial exception (optional import; handle if missing)
+try:
+    from serial import SerialException
+except Exception:
+    class SerialException(Exception):  # fallback type
+        pass
 
 # ----------------------------
 # Defaults & register map
@@ -33,12 +42,12 @@ REG_ENABLE_FLAGS_WRITE_CAND = [4, 6]  # some firmwares require 6 for writing fla
 REG_READ_SENSOR = 12
 
 # Enable Flags bits (Seifert/SCE NextGen family)
-BIT_INPUT1_INVERT        = 8     # we use as "Power" (ACTIVE-LOW on your unit)
+BIT_INPUT1_INVERT        = 8     # used as "Power" (active-low on this unit)
 BIT_LOCK_KEYPAD          = 10    # always ON
 BIT_TEMP_UNIT_FAHRENHEIT = 11    # always OFF (Celsius)
-BIT_NETWORK_SETPOINTS: Optional[int] = 9   # set None if your unit doesn't support it
+BIT_NETWORK_SETPOINTS: Optional[int] = 9   # set None if the unit doesn't support it
 
-# Reasonable safety limits (device often enforces similar)
+# Reasonable safety limits (device enforces similar)
 SAFE_C_LIMITS = {
     "low":   (-20.0,  25.0),
     "heat":  ( -5.0,  35.0),
@@ -63,7 +72,7 @@ def clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
 
 # ----------------------------
-# Robust Modbus controller
+# Robust Modbus controller (thread-safe)
 # ----------------------------
 @dataclass
 class ACController:
@@ -77,37 +86,44 @@ class ACController:
 
     client: Optional[ModbusSerialClient] = None
     flags_write_addr: Optional[int] = None  # auto-detected
+    io_lock: threading.RLock = threading.RLock()
 
     # --- connect/disconnect ---
     def connect(self) -> bool:
-        self.client = ModbusSerialClient(
-            port=self.port,
-            baudrate=self.baudrate,
-            parity=self.parity,
-            stopbits=self.stopbits,
-            bytesize=self.bytesize,
-            timeout=self.timeout,
-        )
-        ok = self.client.connect()
-        if ok:
-            try:
-                self._detect_flags_write_address()
-            except Exception:
-                pass
-            # Enforce policy on connect (lock keypad, Celsius), preserve power & NET state
-            try:
-                cur = self.read_enable_flags()
-                cur_power_on = self._power_on_from_flags(cur)  # ACTIVE-LOW mapping
-                cur_net = self._net_on_from_flags(cur)
-                self.write_flags(power_on=cur_power_on, force_net=cur_net)
-            except Exception:
-                pass
-        return ok
+        with self.io_lock:
+            # Close any stale handle first (prevents PermissionError on Windows)
+            with suppress(Exception):
+                if self.client:
+                    self.client.close()
+            self.client = ModbusSerialClient(
+                port=self.port,
+                baudrate=self.baudrate,
+                parity=self.parity,
+                stopbits=self.stopbits,
+                bytesize=self.bytesize,
+                timeout=self.timeout,
+            )
+            ok = self.client.connect()
+            if ok:
+                with suppress(Exception):
+                    self._detect_flags_write_address()
+                # Enforce policy on connect (lock keypad, Celsius), preserve power & NET
+                with suppress(Exception):
+                    cur = self.read_enable_flags()
+                    cur_power_on = self._power_on_from_flags(cur)  # ACTIVE-LOW mapping
+                    cur_net = self._net_on_from_flags(cur)
+                    self.write_flags(power_on=cur_power_on, force_net=cur_net)
+            return ok
+
+    def is_connected(self) -> bool:
+        return self.client is not None
 
     def close(self):
-        if self.client:
-            self.client.close()
-            self.client = None
+        with self.io_lock:
+            if self.client:
+                with suppress(Exception):
+                    self.client.close()
+                self.client = None
 
     # --- modbus compat helpers ---
     def _kw_unit_for(self, fn):
@@ -124,39 +140,41 @@ class ACController:
         except Exception: return False
 
     def _read_hregs(self, address, count=1):
-        fn = getattr(self.client, "read_holding_registers", None)
-        if fn is not None:
+        with self.io_lock:
+            fn = getattr(self.client, "read_holding_registers", None)
+            if fn is not None:
+                kw = self._kw_unit_for(fn)
+                kwargs = {kw: self.unit} if kw else {}
+                try:
+                    if self._supports_param(fn, "count") or self._supports_param(fn, "quantity"):
+                        rr = fn(address, count, **kwargs)
+                    else:
+                        rr = fn(address, **kwargs)
+                except TypeError:
+                    try: rr = fn(address, **kwargs)
+                    except TypeError: rr = fn(address)
+                if rr.isError(): raise ModbusException(rr)
+                return rr
+            fn = getattr(self.client, "read_holding_register", None)
+            if fn is None: raise RuntimeError("Client missing read_holding_register(s)")
             kw = self._kw_unit_for(fn)
             kwargs = {kw: self.unit} if kw else {}
-            try:
-                if self._supports_param(fn, "count") or self._supports_param(fn, "quantity"):
-                    rr = fn(address, count, **kwargs)
-                else:
-                    rr = fn(address, **kwargs)
-            except TypeError:
-                try: rr = fn(address, **kwargs)
-                except TypeError: rr = fn(address)
+            try: rr = fn(address, **kwargs)
+            except TypeError: rr = fn(address)
             if rr.isError(): raise ModbusException(rr)
             return rr
-        fn = getattr(self.client, "read_holding_register", None)
-        if fn is None: raise RuntimeError("Client missing read_holding_register(s)")
-        kw = self._kw_unit_for(fn)
-        kwargs = {kw: self.unit} if kw else {}
-        try: rr = fn(address, **kwargs)
-        except TypeError: rr = fn(address)
-        if rr.isError(): raise ModbusException(rr)
-        return rr
 
     def _write_reg(self, address, value):
-        fn = getattr(self.client, "write_register", None)
-        if fn is None: raise RuntimeError("Client missing write_register")
-        kw = self._kw_unit_for(fn)
-        kwargs = {kw: self.unit} if kw else {}
-        wr = fn(address, int(value), **kwargs) if kwargs else fn(address, int(value))
-        if wr.isError():
-            code = getattr(wr, "exception_code", "??")
-            raise ModbusException(f"ExceptionResponse(dev_id={self.unit}, function_code={wr.function_code}, exception_code={code})")
-        return wr
+        with self.io_lock:
+            fn = getattr(self.client, "write_register", None)
+            if fn is None: raise RuntimeError("Client missing write_register")
+            kw = self._kw_unit_for(fn)
+            kwargs = {kw: self.unit} if kw else {}
+            wr = fn(address, int(value), **kwargs) if kwargs else fn(address, int(value))
+            if wr.isError():
+                code = getattr(wr, "exception_code", "??")
+                raise ModbusException(f"ExceptionResponse(dev_id={self.unit}, function_code={wr.function_code}, exception_code={code})")
+            return wr
 
     def _try_echo_write(self, addr, value) -> bool:
         try:
@@ -185,8 +203,7 @@ class ACController:
 
     # --- flag helpers (ACTIVE-LOW power mapping) ---
     def _power_on_from_flags(self, flags: int) -> bool:
-        # Bit=1 means "invert input" → ON becomes OFF on your unit.
-        # Treat bit=0 as Power ON, bit=1 as Power OFF.
+        # ACTIVE-LOW: bit=0 -> ON, bit=1 -> OFF
         return ((flags >> BIT_INPUT1_INVERT) & 1) == 0
 
     def _net_on_from_flags(self, flags: int) -> bool:
@@ -195,10 +212,8 @@ class ACController:
     def write_flags(self, power_on: bool, force_net: Optional[bool] = None):
         """Lock keypad, force Celsius, control power. Preserve or set NET bit."""
         current = 0
-        try:
+        with suppress(Exception):
             current = self.read_enable_flags()
-        except Exception:
-            pass
         net_on = self._net_on_from_flags(current) if force_net is None else bool(force_net)
 
         word = 0
@@ -228,10 +243,10 @@ class ACController:
         hi = cooling_c + 5.0
 
         # clamp to safe ranges
-        lo      = clamp(lo,      *SAFE_C_LIMITS["low"])
-        heater_c= clamp(heater_c,*SAFE_C_LIMITS["heat"])
-        cooling_c=clamp(cooling_c,*SAFE_C_LIMITS["cool"])
-        hi      = clamp(hi,      *SAFE_C_LIMITS["high"])
+        lo       = clamp(lo,       *SAFE_C_LIMITS["low"])
+        heater_c = clamp(heater_c, *SAFE_C_LIMITS["heat"])
+        cooling_c= clamp(cooling_c,*SAFE_C_LIMITS["cool"])
+        hi       = clamp(hi,       *SAFE_C_LIMITS["high"])
 
         # enforce order with 1°C separation
         eps = 1.0
@@ -258,11 +273,8 @@ class ACController:
             do_writes()
         finally:
             if BIT_NETWORK_SETPOINTS is not None and not had_net:
-                # restore original NET state (off), keep power as was
-                try:
+                with suppress(Exception):
                     self.write_flags(power_on=had_power, force_net=False)
-                except Exception:
-                    pass
 
 # ----------------------------
 # Simple dual-handle range slider (Canvas)
