@@ -30,16 +30,12 @@ REG_SET_HEATER     = 3
 REG_ENABLE_FLAGS_READ       = 4
 REG_ENABLE_FLAGS_WRITE_CAND = [4, 6]  # some firmwares require 6 for writing flags
 
-REG_READ_CTL_SETPOINT = 5
-REG_READ_SENSOR       = 12
-REG_READ_ALARMS       = 14
-REG_READ_OUTPUTS      = 15
-REG_READ_CONTACTS     = 16
+REG_READ_SENSOR = 12
 
-# Enable Flags bits
-BIT_INPUT1_INVERT        = 8    # used here as "Power"
-BIT_LOCK_KEYPAD          = 10   # always ON
-BIT_TEMP_UNIT_FAHRENHEIT = 11   # always OFF (Celsius)
+# Enable Flags bits (Seifert/SCE NextGen family)
+BIT_INPUT1_INVERT        = 8     # we use as "Power" (ACTIVE-LOW on your unit)
+BIT_LOCK_KEYPAD          = 10    # always ON
+BIT_TEMP_UNIT_FAHRENHEIT = 11    # always OFF (Celsius)
 BIT_NETWORK_SETPOINTS: Optional[int] = 9   # set None if your unit doesn't support it
 
 # Reasonable safety limits (device often enforces similar)
@@ -51,7 +47,7 @@ SAFE_C_LIMITS = {
 }
 
 # ----------------------------
-# Basic temp helpers (0.1° scaling)
+# Helpers (0.1° scaling)
 # ----------------------------
 def to_signed_16(u: int) -> int:
     return u - 0x10000 if u >= 0x8000 else u
@@ -98,11 +94,12 @@ class ACController:
                 self._detect_flags_write_address()
             except Exception:
                 pass
-            # Force flags to our policy on connect: keypad locked, Celsius; leave power as-is
+            # Enforce policy on connect (lock keypad, Celsius), preserve power & NET state
             try:
                 cur = self.read_enable_flags()
-                power_on = bool((cur >> BIT_INPUT1_INVERT) & 1)
-                self.write_flags(power_on=power_on)  # lock=ON, celsius
+                cur_power_on = self._power_on_from_flags(cur)  # ACTIVE-LOW mapping
+                cur_net = self._net_on_from_flags(cur)
+                self.write_flags(power_on=cur_power_on, force_net=cur_net)
             except Exception:
                 pass
         return ok
@@ -184,19 +181,35 @@ class ACController:
     def read_sensor_c(self) -> float:
         rr = self._read_hregs(REG_READ_SENSOR, 1)
         raw = getattr(rr, "registers", [getattr(rr, "register", 0)])[0]
-        # Device might be in F or C; but on connect we force C. Still, be safe:
-        return reg_to_val(raw)  # interpret as °C (we enforce Celsius in flags)
+        return reg_to_val(raw)  # we enforce Celsius in flags
 
-    # --- flags (policy: keypad locked, Celsius; power via bit 8) ---
-    def write_flags(self, power_on: bool):
+    # --- flag helpers (ACTIVE-LOW power mapping) ---
+    def _power_on_from_flags(self, flags: int) -> bool:
+        # Bit=1 means "invert input" → ON becomes OFF on your unit.
+        # Treat bit=0 as Power ON, bit=1 as Power OFF.
+        return ((flags >> BIT_INPUT1_INVERT) & 1) == 0
+
+    def _net_on_from_flags(self, flags: int) -> bool:
+        return BIT_NETWORK_SETPOINTS is not None and ((flags >> BIT_NETWORK_SETPOINTS) & 1) == 1
+
+    def write_flags(self, power_on: bool, force_net: Optional[bool] = None):
+        """Lock keypad, force Celsius, control power. Preserve or set NET bit."""
+        current = 0
+        try:
+            current = self.read_enable_flags()
+        except Exception:
+            pass
+        net_on = self._net_on_from_flags(current) if force_net is None else bool(force_net)
+
         word = 0
-        if power_on: word |= (1 << BIT_INPUT1_INVERT)           # "Power"
-        word |= (1 << BIT_LOCK_KEYPAD)                           # always lock
-        # Celsius => Fahrenheit bit OFF
-        # Optionally enable network setpoints to allow remote writes
-        if BIT_NETWORK_SETPOINTS is not None:
+        # ACTIVE-LOW: to turn ON, we must CLEAR the invert bit
+        if not power_on:
+            word |= (1 << BIT_INPUT1_INVERT)    # OFF → set bit
+        word |= (1 << BIT_LOCK_KEYPAD)          # always lock
+        # Celsius → Fahrenheit bit OFF
+        if net_on and BIT_NETWORK_SETPOINTS is not None:
             word |= (1 << BIT_NETWORK_SETPOINTS)
-        # write to whichever address accepts it
+
         addrs = [self.flags_write_addr] if self.flags_write_addr is not None else REG_ENABLE_FLAGS_WRITE_CAND
         last = None
         for a in [x for x in addrs if x is not None]:
@@ -210,23 +223,23 @@ class ACController:
 
     # --- setpoints (Celsius only) ---
     def write_setpoints_c(self, heater_c: float, cooling_c: float):
-        # derive alarms to keep relationships valid
+        # Compute alarms to keep relationships valid at every intermediate write
         lo = heater_c - 2.0
         hi = cooling_c + 5.0
 
         # clamp to safe ranges
-        lo   = clamp(lo,   *SAFE_C_LIMITS["low"])
-        heater_c = clamp(heater_c, *SAFE_C_LIMITS["heat"])
-        cooling_c= clamp(cooling_c,*SAFE_C_LIMITS["cool"])
-        hi   = clamp(hi,   *SAFE_C_LIMITS["high"])
+        lo      = clamp(lo,      *SAFE_C_LIMITS["low"])
+        heater_c= clamp(heater_c,*SAFE_C_LIMITS["heat"])
+        cooling_c=clamp(cooling_c,*SAFE_C_LIMITS["cool"])
+        hi      = clamp(hi,      *SAFE_C_LIMITS["high"])
 
         # enforce order with 1°C separation
         eps = 1.0
         if not (lo < heater_c - eps and heater_c < cooling_c - eps and cooling_c < hi - eps):
             raise ValueError("Range must satisfy: Low < Heater < Cooling < High (≥1°C apart).")
 
-        # do the write with temporary Network Setpoints ON (if supported)
         def do_writes():
+            # WRITE ORDER IS IMPORTANT: low -> heat -> cool -> high
             for addr, val in [
                 (REG_SET_ALARM_LO, c_to_reg(lo)),
                 (REG_SET_HEATER,   c_to_reg(heater_c)),
@@ -235,37 +248,19 @@ class ACController:
             ]:
                 self._write_reg(addr, val)
 
-        self._with_network_mode(do_writes)
-
-    def _with_network_mode(self, fn):
+        # Temporarily enable Network Setpoints while writing, then restore
         initial = self.read_enable_flags()
-        had_net = (BIT_NETWORK_SETPOINTS is not None) and bool((initial >> BIT_NETWORK_SETPOINTS) & 1)
-        power_on = bool((initial >> BIT_INPUT1_INVERT) & 1)
+        had_net = self._net_on_from_flags(initial)
+        had_power = self._power_on_from_flags(initial)
         try:
-            # ensure keypad locked, Celsius, (optionally) network ON, preserve power
             if BIT_NETWORK_SETPOINTS is not None and not had_net:
-                self.write_flags(power_on=power_on)
-            fn()
+                self.write_flags(power_on=had_power, force_net=True)
+            do_writes()
         finally:
-            # restore network bit if we changed it
             if BIT_NETWORK_SETPOINTS is not None and not had_net:
+                # restore original NET state (off), keep power as was
                 try:
-                    # turn NET off but keep power & lock policy
-                    # (lock always on; celsius always enforced)
-                    if had_net is False:
-                        # rebuild word without NET
-                        word = 0
-                        if power_on: word |= (1 << BIT_INPUT1_INVERT)
-                        word |= (1 << BIT_LOCK_KEYPAD)
-                        # write
-                        addrs = [self.flags_write_addr] if self.flags_write_addr is not None else REG_ENABLE_FLAGS_WRITE_CAND
-                        for a in [x for x in addrs if x is not None]:
-                            try:
-                                self._write_reg(a, word)
-                                self.flags_write_addr = a
-                                break
-                            except Exception:
-                                continue
+                    self.write_flags(power_on=had_power, force_net=False)
                 except Exception:
                     pass
 
@@ -273,7 +268,8 @@ class ACController:
 # Simple dual-handle range slider (Canvas)
 # ----------------------------
 class RangeSlider(tk.Canvas):
-    def __init__(self, master, min_val=0.0, max_val=100.0, init_low=20.0, init_high=80.0, width=360, height=48, step=0.5, **kw):
+    def __init__(self, master, min_val=0.0, max_val=60.0, init_low=15.0, init_high=20.0,
+                 width=400, height=56, step=0.5, **kw):
         super().__init__(master, width=width, height=height, highlightthickness=0, **kw)
         self.min_val, self.max_val = float(min_val), float(max_val)
         self.low_val, self.high_val = float(init_low), float(init_high)
@@ -316,7 +312,6 @@ class RangeSlider(tk.Canvas):
         x0, x1 = self.pad, w - self.pad
         x = max(x0, min(x1, x))
         v = self.min_val + (self.max_val - self.min_val) * ((x - x0) / (x1 - x0))
-        # snap to step
         return round(v / self.step) * self.step
 
     def on_press(self, e):
@@ -331,7 +326,7 @@ class RangeSlider(tk.Canvas):
         if not self.dragging: return
         v = self.x_to_val(e.x)
         if self.dragging == "low":
-            self.low_val = min(v, self.high_val - 1.0)  # keep 1°C gap
+            self.low_val = min(v, self.high_val - 1.0)  # keep ≥1°C gap
         else:
             self.high_val = max(v, self.low_val + 1.0)
         self.draw()
@@ -340,6 +335,7 @@ class RangeSlider(tk.Canvas):
         self.dragging = None
 
     def get_values(self) -> Tuple[float, float]:
+        # left handle = heater setpoint, right handle = cooling setpoint
         return (self.low_val, self.high_val)
 
 # ----------------------------
@@ -400,10 +396,10 @@ class App(tk.Tk):
             if not self.controller.connect():
                 raise RuntimeError("Failed to open serial port.")
             self._update_indicator(True)
-            # Read current power bit and reflect in UI
+            # Reflect current power bit (ACTIVE-LOW → checked means ON)
             try:
                 flags = self.controller.read_enable_flags()
-                self.var_power.set(bool((flags >> BIT_INPUT1_INVERT) & 1))
+                self.var_power.set(self.controller._power_on_from_flags(flags))
             except Exception:
                 pass
             self._start_auto_refresh()
@@ -431,7 +427,7 @@ class App(tk.Tk):
         try:
             temp_c = self.controller.read_sensor_c()
             self.lbl_temp.config(text=f"Temperature: {temp_c:.1f} °C")
-        except Exception as e:
+        except Exception:
             self.lbl_temp.config(text=f"Temperature: --.- °C")
         self.refresh_job = self.after(5000, self._do_refresh_loop)
 
@@ -447,7 +443,7 @@ class App(tk.Tk):
             messagebox.showwarning("Not connected", "Connect first.")
             return
         try:
-            self.controller.write_flags(power_on=self.var_power.get())
+            self.controller.write_flags(power_on=self.var_power.get(), force_net=None)
             messagebox.showinfo("OK", "Power/flags updated.")
         except Exception as e:
             messagebox.showerror("Write error", str(e))
